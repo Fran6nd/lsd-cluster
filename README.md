@@ -36,9 +36,12 @@ your PATH, short for `docker exec -it lsd-cluster lsdc`.
 ## Use
 
 ```sh
-lsdc new ctf --port 32887       # the setup wizard, then the server starts on 32887
-lsdc new tdm                    # ...on the first free port; --defaults skips the wizard
+lsdc new ctf --port 32887       # a server on lsd-docker's defaults, started on 32887
+lsdc new tdm                    # ...on the first free port
+lsdc ctf setup                  # then lsdctl takes over: the wizard, or set, gamemode, map...
 lsdc ls                         # every instance: port, state, version, outdated or not
+lsdc ports                      # the cluster's ports: whose, and which are free
+lsdc port tdm 32890             # move an instance (lsdc tdm set port 32890 is the same)
 
 lsdc ctf status                 # any lsdctl command, on one instance
 lsdc ctf,tdm set masterlist_enabled false
@@ -53,6 +56,11 @@ lsdc update all                 # move them to it (lsd-docker's own update, one 
 lsdc stop tdm; lsdc start all; lsdc logs ctf -f
 lsdc rm tdm [--keep-data]
 ```
+
+An instance's port is the cluster's to keep: after any lsdctl command
+(`setup` and `edit` may change it too), lsdc moves the instance to the
+port its settings name, or puts the settings back if that port is
+outside the range or another instance's.
 
 ## Developing
 

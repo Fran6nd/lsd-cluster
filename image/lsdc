@@ -24,8 +24,11 @@ usage() {
 	cat <<EOF
 lsdc -- administer the lsd-docker servers of this cluster
 
-  lsdc new <name> [--port P] [--defaults]   set up an instance and start it
+  lsdc new <name> [--port P]                an instance on lsd-docker's defaults, started;
+                                            then configure it: lsdc <name> setup | set | ...
   lsdc ls                                   every instance: port, state, version
+  lsdc ports                                the cluster's ports: whose, and which are free
+  lsdc port <name> <P>                      move an instance to another port
   lsdc outdated                             fetch the newest image; list who is behind
   lsdc update <name>... | all               move instances to the newest image
   lsdc start|stop|restart <name>... | all
@@ -55,6 +58,17 @@ is_instance() {
 port_of() {
 	docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{(index $b 0).HostPort}} {{end}}' "$1" \
 		| awk '{print $1}'
+}
+
+# A port an instance may take: a number, in the range, held by no other.
+check_port() {
+	echo "$1" | grep -Eq '^[0-9]+$' || die "port $1: not a number"
+	[ "$1" -ge "$PORT_LO" ] && [ "$1" -le "$PORT_HI" ] \
+		|| die "port $1 is outside $PORTS, the ports this cluster publishes"
+	for n in $(instances); do
+		[ "$n" != "${2:-}" ] || continue
+		[ "$(port_of "$n")" != "$1" ] || die "port $1 is $n's (lsdc ports)"
+	done
 }
 
 used_ports() {
@@ -140,16 +154,15 @@ offline_sh() {
 # ------------------------------------------------------------- commands
 
 cmd_new() {
-	name= port= defaults=
+	name= port=
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--port) port=${2:-}; [ -n "$port" ] || die "--port needs a number"; shift 2 ;;
-		--defaults) defaults=1; shift ;;
 		-*) die "new: unknown option $1" ;;
 		*) [ -z "$name" ] || die "new: one name"; name=$1; shift ;;
 		esac
 	done
-	[ -n "$name" ] || die "new <name> [--port P] [--defaults]"
+	[ -n "$name" ] || die "new <name> [--port P]"
 	echo "$name" | grep -Eq '^[a-z0-9][a-z0-9_.-]{0,30}$' \
 		|| die "$name: a name is lowercase letters, digits, _ . - (at most 31)"
 	[ "$name" != all ] && [ "$name" != "$SHARED" ] || die "$name is reserved"
@@ -157,28 +170,16 @@ cmd_new() {
 		die "$name exists already (lsdc rm $name first)"
 	fi
 
-	if [ -z "$port" ]; then
-		port=$(free_port)
-	else
-		echo "$port" | grep -Eq '^[0-9]+$' || die "--port $port: not a number"
-		[ "$port" -ge "$PORT_LO" ] && [ "$port" -le "$PORT_HI" ] \
-			|| die "port $port is outside $PORTS, the ports this cluster publishes"
-		used_ports | grep -qx "$port" && die "port $port is taken (lsdc ls)"
-	fi
+	if [ -z "$port" ]; then port=$(free_port); else check_port "$port"; fi
 
 	have_image
 	shared_volume
 	docker volume create "$name" >/dev/null
 
-	# The wizard on a terminal; its defaults otherwise. The port it may
-	# ask for is replaced by the cluster's below.
-	if [ -z "$defaults" ] && [ -t 0 ] && [ -t 1 ]; then
-		docker run --rm -it -v "$name:/data" "$IMAGE" setup \
-			|| { docker volume rm "$name" >/dev/null; die "setup did not finish; nothing kept"; }
-	else
-		docker run --rm -v "$name:/data" "$IMAGE" setup --defaults >/dev/null \
-			|| { docker volume rm "$name" >/dev/null; die "setup failed; nothing kept"; }
-	fi
+	# lsd-docker's defaults: what to play, its name, its listing are
+	# lsdctl's to change afterwards, on the running instance.
+	docker run --rm -v "$name:/data" "$IMAGE" setup --defaults >/dev/null \
+		|| { docker volume rm "$name" >/dev/null; die "setup failed; nothing kept"; }
 
 	# Its port, and the admin work kept with every other instance's.
 	offline_sh "$name" "
@@ -192,7 +193,45 @@ cmd_new() {
 		-p "$port:$port/udp" -e LSD_HOST_ADDRESSES="${LSD_HOST_ADDRESSES:-}" \
 		-v "$name:/data" -v "$SHARED:/shared" "$IMAGE" >/dev/null
 	wait_up "$name"
-	echo "$name is up on $port/udp"
+	echo "$name is up on $port/udp, on lsd-docker's defaults"
+	docker exec "$name" lsdctl address
+	echo "configure it: lsdc $name setup (the wizard), or lsdc $name set|gamemode|map|install ..."
+}
+
+cmd_ports() {
+	printf '%-6s %s\n' PORT INSTANCE
+	p=$PORT_LO
+	taken=$(for n in $(instances); do echo "$(port_of "$n") $n"; done)
+	while [ "$p" -le "$PORT_HI" ]; do
+		who=$(echo "$taken" | awk -v p="$p" '$1 == p {print $2}')
+		printf '%-6s %s\n' "$p" "${who:--}"
+		p=$((p + 1))
+	done
+	# an instance moved outside the range by hand still holds its port
+	echo "$taken" | awk -v lo="$PORT_LO" -v hi="$PORT_HI" \
+		'NF == 2 && ($1 < lo || $1 > hi) {printf "%-6s %s (outside %s-%s: unreachable)\n", $1, $2, lo, hi}'
+}
+
+# The server's port in its settings, then the container recreated to
+# publish it -- lsd-docker's update does both halves of that (it reads
+# the settings' port), keeping everything else. A stopped instance is
+# started by it.
+cmd_port() {
+	[ $# -eq 2 ] || die "port <name> <P>"
+	name=$1 port=$2
+	is_instance "$name" || die "no instance called $name (lsdc ls)"
+	[ "$(port_of "$name")" != "$port" ] || { echo "$name is on $port already"; return; }
+	check_port "$port" "$name"
+	if running "$name"; then
+		docker exec "$name" lsdctl set port "$port" --no-restart >/dev/null
+	else
+		offline_sh "$name" "lsdctl set port $port --no-restart" >/dev/null
+	fi
+	docker run --rm --volumes-from "$name" -v /var/run/docker.sock:/var/run/docker.sock \
+		"$(docker inspect -f '{{.Config.Image}}' "$name")" update --name "$name" --no-pull >/dev/null \
+		|| die "$name could not be moved; its settings say $port, it still publishes $(port_of "$name")"
+	wait_up "$name"
+	echo "$name is on $port/udp"
 	docker exec "$name" lsdctl address
 }
 
@@ -284,18 +323,46 @@ cmd_account() {
 	die "no instance is running; accounts are reached through one"
 }
 
+# After lsdctl changed an instance's settings -- set, setup, edit,
+# import may all name a port -- the container publishes what they say:
+# moved if the port is one it may take, else the settings put back.
+follow_port() {
+	running "$1" || return 0
+	want=$(docker exec "$1" lsdctl get port 2>/dev/null) || return 0
+	have=$(port_of "$1")
+	[ -n "$want" ] && [ "$want" != "$have" ] || return 0
+	if (check_port "$want" "$1") 2>/dev/null; then
+		echo "lsdc: $1's settings now say port $want: moving it there"
+		cmd_port "$1" "$want"
+	else
+		docker exec "$1" lsdctl set port "$have" --no-restart >/dev/null
+		(check_port "$want" "$1") 2>&1 | sed "s/^lsdc: /lsdc: $1 stays on $have: /" >&2
+		return 1
+	fi
+}
+
 # lsdctl on one instance (a terminal, if there is one), or on several in
 # turn, each headed by its name.
 cmd_lsdctl() {
 	list=$(targets "$1"); shift
 	[ -n "$list" ] || die "no instances"
-	if [ "$(echo "$list" | wc -l)" -eq 1 ]; then
-		exec docker exec -i $( [ -t 0 ] && echo -t ) "$list" lsdctl "$@"
+	# the port is the cluster's to change: settings and container together
+	if [ "${1:-}" = set ] && [ "${2:-}" = port ]; then
+		[ "$(echo "$list" | wc -l)" -eq 1 ] || die "one port per instance: lsdc port <name> <P>"
+		[ $# -ge 3 ] || die "set port <P>"
+		cmd_port "$list" "$3"
+		return
 	fi
 	status=0
+	if [ "$(echo "$list" | wc -l)" -eq 1 ]; then
+		docker exec -i $( [ -t 0 ] && echo -t ) "$list" lsdctl "$@" || status=$?
+		follow_port "$list" || status=1
+		return $status
+	fi
 	for n in $list; do
 		echo "== $n"
 		docker exec "$n" lsdctl "$@" </dev/null || status=1
+		follow_port "$n" || status=1
 	done
 	return $status
 }
@@ -306,6 +373,8 @@ case "${1:-help}" in
 help|-h|--help) usage ;;
 new) shift; cmd_new "$@" ;;
 ls) cmd_ls ;;
+ports) cmd_ports ;;
+port) shift; cmd_port "$@" ;;
 outdated) cmd_outdated ;;
 update) shift; cmd_update "$@" ;;
 start|stop|restart) cmd_state "$@" ;;
