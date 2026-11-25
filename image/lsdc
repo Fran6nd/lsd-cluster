@@ -1,0 +1,320 @@
+#!/bin/sh
+# lsdc -- administer the lsd-docker servers of this cluster
+#
+# Copyright (C) 2026 Fran6nd. GPL-3.0-or-later; see LICENSE.
+#
+# Runs inside the cluster's container, against its own Docker engine.
+# An instance is an lsd-docker container labelled lsd-cluster.instance;
+# Docker is the only record: the list is `docker ps`, a port is what the
+# container publishes, a version is its image's label. Every instance
+# keeps its accounts and bans on one volume (lsd-shared), so admin work
+# done on one is done on all.
+set -eu
+
+IMAGE=${LSDC_IMAGE:-ghcr.io/fran6nd/lsd-docker}
+PORTS=${LSDC_PORTS:-32887-32906}
+SHARED=lsd-shared
+LABEL=lsd-cluster.instance
+PORT_LO=${PORTS%-*}
+PORT_HI=${PORTS#*-}
+
+die() { echo "lsdc: $*" >&2; exit 1; }
+
+usage() {
+	cat <<EOF
+lsdc -- administer the lsd-docker servers of this cluster
+
+  lsdc new <name> [--port P] [--defaults]   set up an instance and start it
+  lsdc ls                                   every instance: port, state, version
+  lsdc outdated                             fetch the newest image; list who is behind
+  lsdc update <name>... | all               move instances to the newest image
+  lsdc start|stop|restart <name>... | all
+  lsdc logs <name> [docker logs options]
+  lsdc rm <name> [--keep-data]
+
+  lsdc account ...                          the accounts of every instance (shared):
+                                            list, add <name> [caps], caps, passwd, rm
+  lsdc <name> <lsdctl command>              run lsdctl on one instance
+  lsdc <a,b,...|all> <lsdctl command>       ...on several, one after the other
+
+Ports $PORTS/udp (LSDC_PORTS) are the ones this container publishes.
+EOF
+}
+
+# ------------------------------------------------------------ instances
+
+instances() {
+	docker ps -a --filter "label=$LABEL" --format '{{.Names}}' | sort
+}
+
+is_instance() {
+	[ "$(docker inspect -f "{{index .Config.Labels \"$LABEL\"}}" "$1" 2>/dev/null)" = "$1" ]
+}
+
+# The UDP port an instance publishes (host side, which is its server's).
+port_of() {
+	docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{(index $b 0).HostPort}} {{end}}' "$1" \
+		| awk '{print $1}'
+}
+
+used_ports() {
+	for n in $(instances); do port_of "$n"; done
+}
+
+free_port() {
+	used=" $(used_ports | tr '\n' ' ') "
+	p=$PORT_LO
+	while [ "$p" -le "$PORT_HI" ]; do
+		case "$used" in *" $p "*) ;; *) echo "$p"; return ;; esac
+		p=$((p + 1))
+	done
+	die "every port of $PORTS is taken: remove an instance, or recreate the cluster with a wider LSDC_PORTS"
+}
+
+# "all", or a comma-separated list of instances; each checked here, not
+# in a pipe, so a wrong name stops the command.
+targets() {
+	if [ "$1" = all ]; then
+		instances
+		return
+	fi
+	for n in $(echo "$1" | tr ',' ' '); do
+		is_instance "$n" || die "no instance called $n (lsdc ls)"
+	done
+	echo "$1" | tr ',' '\n' | grep -v '^$'
+}
+
+running() {
+	[ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = true ]
+}
+
+wait_up() {
+	i=0
+	until docker exec "$1" lsdctl status 2>/dev/null | grep -q 'server: *running'; do
+		i=$((i + 1))
+		[ $i -lt 90 ] || { docker logs "$1" 2>&1 | tail -20 >&2; die "$1 did not come up"; }
+		sleep 1
+	done
+}
+
+# ---------------------------------------------------------------- image
+
+image_id() { docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null; }
+
+have_image() {
+	[ -n "$(image_id)" ] && return
+	echo "pulling $IMAGE..."
+	docker pull -q "$IMAGE" >/dev/null || die "cannot pull $IMAGE"
+}
+
+# The newest image, if the registry answers; the one here if not.
+fetch_image() {
+	docker pull -q "$IMAGE" >/dev/null 2>&1 \
+		|| echo "lsdc: could not reach the registry; comparing with the image already here" >&2
+	[ -n "$(image_id)" ] || die "no $IMAGE here and none could be pulled"
+}
+
+outdated_p() {
+	[ "$(docker inspect -f '{{.Image}}' "$1")" != "$(image_id)" ]
+}
+
+version_of() {
+	docker inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' "$1"
+}
+
+# --------------------------------------------------------------- shared
+
+# The volume every instance keeps its accounts and bans on, owned by the
+# user the server runs as (in the image, not here).
+shared_volume() {
+	docker volume inspect "$SHARED" >/dev/null 2>&1 || docker volume create "$SHARED" >/dev/null
+	docker run --rm -v "$SHARED:/shared" --entrypoint sh "$IMAGE" -c 'chown lsd:lsd /shared'
+}
+
+# A shell in the image against an instance's volume while no server runs
+# on it: the settings new writes after setup.
+offline_sh() {
+	docker run --rm -v "$1:/data" -v "$SHARED:/shared" --entrypoint sh "$IMAGE" -c "$2"
+}
+
+# ------------------------------------------------------------- commands
+
+cmd_new() {
+	name= port= defaults=
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--port) port=${2:-}; [ -n "$port" ] || die "--port needs a number"; shift 2 ;;
+		--defaults) defaults=1; shift ;;
+		-*) die "new: unknown option $1" ;;
+		*) [ -z "$name" ] || die "new: one name"; name=$1; shift ;;
+		esac
+	done
+	[ -n "$name" ] || die "new <name> [--port P] [--defaults]"
+	echo "$name" | grep -Eq '^[a-z0-9][a-z0-9_.-]{0,30}$' \
+		|| die "$name: a name is lowercase letters, digits, _ . - (at most 31)"
+	[ "$name" != all ] && [ "$name" != "$SHARED" ] || die "$name is reserved"
+	if docker container inspect "$name" >/dev/null 2>&1 || docker volume inspect "$name" >/dev/null 2>&1; then
+		die "$name exists already (lsdc rm $name first)"
+	fi
+
+	if [ -z "$port" ]; then
+		port=$(free_port)
+	else
+		echo "$port" | grep -Eq '^[0-9]+$' || die "--port $port: not a number"
+		[ "$port" -ge "$PORT_LO" ] && [ "$port" -le "$PORT_HI" ] \
+			|| die "port $port is outside $PORTS, the ports this cluster publishes"
+		used_ports | grep -qx "$port" && die "port $port is taken (lsdc ls)"
+	fi
+
+	have_image
+	shared_volume
+	docker volume create "$name" >/dev/null
+
+	# The wizard on a terminal; its defaults otherwise. The port it may
+	# ask for is replaced by the cluster's below.
+	if [ -z "$defaults" ] && [ -t 0 ] && [ -t 1 ]; then
+		docker run --rm -it -v "$name:/data" "$IMAGE" setup \
+			|| { docker volume rm "$name" >/dev/null; die "setup did not finish; nothing kept"; }
+	else
+		docker run --rm -v "$name:/data" "$IMAGE" setup --defaults >/dev/null \
+			|| { docker volume rm "$name" >/dev/null; die "setup failed; nothing kept"; }
+	fi
+
+	# Its port, and the admin work kept with every other instance's.
+	offline_sh "$name" "
+		set -e
+		lsdctl set port $port --no-restart
+		lsdctl set auth_db \"'/shared/auth.db'\" --no-restart
+		lsdctl set irc_console_db \"'/shared/auth.db'\" --no-restart
+		lsdctl set bans_db \"'/shared/bans.db'\" --no-restart" >/dev/null
+
+	docker run -d --name "$name" --label "$LABEL=$name" --restart unless-stopped \
+		-p "$port:$port/udp" -e LSD_HOST_ADDRESSES="${LSD_HOST_ADDRESSES:-}" \
+		-v "$name:/data" -v "$SHARED:/shared" "$IMAGE" >/dev/null
+	wait_up "$name"
+	echo "$name is up on $port/udp"
+	docker exec "$name" lsdctl address
+}
+
+cmd_ls() {
+	list=$(instances)
+	[ -n "$list" ] || { echo "no instances (lsdc new <name>)"; return; }
+	latest=$(image_id)
+	printf '%-16s %-6s %-10s %-14s %s\n' NAME PORT STATE VERSION IMAGE
+	for n in $list; do
+		state=$(docker inspect -f '{{.State.Status}}' "$n")
+		if [ -z "$latest" ]; then img=?
+		elif outdated_p "$n"; then img=outdated
+		else img=newest; fi
+		printf '%-16s %-6s %-10s %-14s %s\n' "$n" "$(port_of "$n")" "$state" "$(version_of "$n")" "$img"
+	done
+}
+
+cmd_outdated() {
+	fetch_image
+	echo "newest: $(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' "$IMAGE")"
+	behind=
+	for n in $(instances); do
+		if outdated_p "$n"; then
+			echo "  $n: $(version_of "$n")"
+			behind=1
+		fi
+	done
+	[ -n "$behind" ] || echo "every instance runs it"
+}
+
+# lsd-docker's own update, once per instance, on the image fetched once:
+# it keeps the container's name, volumes (the shared one too), labels,
+# restart policy and port.
+cmd_update() {
+	[ $# -gt 0 ] || die "update <name>... | all"
+	fetch_image
+	for spec in "$@"; do
+		for n in $(targets "$spec"); do
+			if ! outdated_p "$n"; then
+				echo "$n: already on the newest image"
+				continue
+			fi
+			echo "$n: updating"
+			docker run --rm --volumes-from "$n" -v /var/run/docker.sock:/var/run/docker.sock \
+				"$IMAGE" update --name "$n" --no-pull
+		done
+	done
+}
+
+cmd_state() {
+	verb=$1; shift
+	[ $# -gt 0 ] || die "$verb <name>... | all"
+	for spec in "$@"; do
+		for n in $(targets "$spec"); do
+			docker "$verb" "$n" >/dev/null
+			case "$verb" in stop) echo "$n: stopped" ;; *) echo "$n: ${verb}ed" ;; esac
+		done
+	done
+}
+
+cmd_rm() {
+	name= keep=
+	for a in "$@"; do
+		case "$a" in
+		--keep-data) keep=1 ;;
+		-*) die "rm: unknown option $a" ;;
+		*) name=$a ;;
+		esac
+	done
+	[ -n "$name" ] || die "rm <name> [--keep-data]"
+	is_instance "$name" || die "no instance called $name"
+	# -v: its anonymous volumes; the named one is decided below
+	docker rm -f -v "$name" >/dev/null
+	if [ -n "$keep" ]; then
+		echo "$name removed; its volume $name is kept"
+	else
+		docker volume rm "$name" >/dev/null
+		echo "$name removed, with its volume"
+	fi
+}
+
+# Accounts live on the shared volume: any running instance reaches them.
+cmd_account() {
+	for n in $(instances); do
+		if running "$n"; then
+			exec docker exec -i $( [ -t 0 ] && echo -t ) "$n" lsdctl account "$@"
+		fi
+	done
+	die "no instance is running; accounts are reached through one"
+}
+
+# lsdctl on one instance (a terminal, if there is one), or on several in
+# turn, each headed by its name.
+cmd_lsdctl() {
+	list=$(targets "$1"); shift
+	[ -n "$list" ] || die "no instances"
+	if [ "$(echo "$list" | wc -l)" -eq 1 ]; then
+		exec docker exec -i $( [ -t 0 ] && echo -t ) "$list" lsdctl "$@"
+	fi
+	status=0
+	for n in $list; do
+		echo "== $n"
+		docker exec "$n" lsdctl "$@" </dev/null || status=1
+	done
+	return $status
+}
+
+[ -S /var/run/docker.sock ] || die "no Docker engine here: run lsdc inside the lsd-cluster container"
+
+case "${1:-help}" in
+help|-h|--help) usage ;;
+new) shift; cmd_new "$@" ;;
+ls) cmd_ls ;;
+outdated) cmd_outdated ;;
+update) shift; cmd_update "$@" ;;
+start|stop|restart) cmd_state "$@" ;;
+logs) shift; [ $# -gt 0 ] || die "logs <name>"; n=$1; shift; is_instance "$n" || die "no instance called $n"; exec docker logs "$@" "$n" ;;
+rm) shift; cmd_rm "$@" ;;
+account) shift; cmd_account "$@" ;;
+version) cat /usr/local/share/lsd-cluster/VERSION ;;
+*)
+	[ $# -ge 2 ] || die "$1: what? (lsdc help)"
+	cmd_lsdctl "$@"
+	;;
+esac

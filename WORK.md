@@ -16,6 +16,9 @@ DONE (commit), BLOCKED (on what).
 - lsd-cluster is itself one container on one host; the lsd-docker
   servers run inside it (Docker in Docker), not beside it on the host.
 - Linux and macOS hosts only; no Windows.
+- Docker is the only record of the instances: a label (lsd-cluster.instance), the published port, the image's version label. No state file.
+- Admin work is shared: every instance's auth_db, irc_console_db and bans_db point at the volume lsd-shared (/shared). Settings such as cap_groups stay per instance.
+- An instance's host port equals its server's port (lsd-docker's update assumes it).
 - Start simple: no layer that is not needed yet.
 
 ## Items
@@ -23,10 +26,14 @@ DONE (commit), BLOCKED (on what).
 | # | Item | State |
 |---|---|---|
 | 1 | This file, README, LICENSE | DONE (uncommitted) |
-| 2 | Scope: a host-side CLI that creates lsd-docker instances and runs lsdctl on one, several or all of them (e.g. make someone admin everywhere) | REVIEW (study done 2026-11-25; owner to confirm the open questions) |
+| 2 | Scope: a CLI that creates lsd-docker instances and runs lsdctl on one, several or all of them | DONE (study 2026-11-25; decisions above) |
 | 4 | commit-msg hook: no mention of Claude/AI in commit messages | DONE (uncommitted) |
+| 6 | The cluster: Dockerfile (dind), install.sh, `lsdc` new/ls/outdated/update/start/stop/restart/logs/rm/account and lsdctl on one, several or all | DONE (tested live in a test cluster, see log) |
+| 7 | Publish the image: CI building ghcr.io/fran6nd/lsd-cluster (install.sh pulls it), and tests (a smoke run like lsd-docker's dev/smoke.sh) | TODO |
+| 8 | Shared content: maps, bot trees, catalog entries -- shared by every instance or per instance? | TODO (owner) |
+| 9 | lsd-docker: a listed server cannot start without DNS (masterlist_connect raises, the server exits and restarts every 30 s) | TODO (in lsd-docker) |
 | 5 | Interactive terminal: a shell inside the cluster with autocomplete (instances, lsdctl commands) to move between instances and run commands on the current one | TODO |
-| 3 | lsd-docker: `lsdctl account list\|add\|caps\|passwd\|rm` (patches 0003-accounts, 0004-console-redact) | REVIEW (in lsd-docker's working tree, uncommitted; dev/test.sh and dev/smoke.sh green) |
+| 3 | lsd-docker: `lsdctl account list\|add\|caps\|passwd\|rm` (patches 0003-accounts, 0004-console-redact) | DONE (lsd-docker fd004e5; reaches instances with lsd-docker's next release) |
 
 ## Log
 
@@ -37,3 +44,5 @@ DONE (commit), BLOCKED (on what).
 - 2026-11-25: githooks/commit-msg added and enabled (core.hooksPath); no commits existed yet, so no message needed editing.
 - 2026-11-25: owner: lsd-cluster provides an interactive terminal with autocomplete to navigate between instances (item 5).
 - 2026-11-25: item 3 built in lsd-docker. auth.lua gains useradd/userpasswd/userdel and auth_account(s) (patch 0003); lsdctl account drives them over the console and checks the result by reading the account back. Found and fixed on the way: the socket/websocket/IRC consoles logged passwords of /register and /login in clear (patch 0004).
+- 2026-11-25: owner: a command sets up an instance on a port; all admin work is shared across instances; list outdated instances and update them all.
+- 2026-11-25: item 6 built and tried in a test cluster (dind on Docker Desktop, macOS): new on a given and on the first free port; refused a port outside the range, a taken name, a bad name; an admin made through one instance logs in on another; lsdctl on one, a list, all; stop/start; outdated and update (one, all) on a newer local image, keeping port, volumes, label and restart policy; instances back after the cluster restarts; rm with and without its data. The tests blocked the masterlist port (32886/udp) so nothing was announced, except perhaps for a few seconds after the cluster restart, before the rule was set again.
