@@ -36,9 +36,9 @@ your PATH, short for `docker exec -it lsd-cluster lsdc`.
 ## Use
 
 ```sh
-lsdc new ctf --port 32887       # a server on lsd-docker's defaults, started on 32887
+lsdc new ctf --port 32887       # a server on lsd-docker's defaults, unlisted, started on 32887
 lsdc new tdm                    # ...on the first free port
-lsdc ctf setup                  # then lsdctl takes over: the wizard, or set, gamemode, map...
+lsdc ctf setup                  # then lsdctl takes over: the wizard (it asks about listing), set, gamemode...
 lsdc ls                         # every instance: port, state, version, outdated or not
 lsdc ports                      # the cluster's ports: whose, and which are free
 lsdc port tdm 32890             # move an instance (lsdc tdm set port 32890 is the same)

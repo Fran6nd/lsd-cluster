@@ -24,7 +24,7 @@ usage() {
 	cat <<EOF
 lsdc -- administer the lsd-docker servers of this cluster
 
-  lsdc new <name> [--port P]                an instance on lsd-docker's defaults, started;
+  lsdc new <name> [--port P]                an instance on lsd-docker's defaults, unlisted, started;
                                             then configure it: lsdc <name> setup | set | ...
   lsdc ls                                   every instance: port, state, version
   lsdc ports                                the cluster's ports: whose, and which are free
@@ -176,7 +176,8 @@ cmd_new() {
 	shared_volume
 	docker volume create "$name" >/dev/null
 
-	# lsd-docker's defaults: what to play, its name, its listing are
+	# lsd-docker's defaults, unlisted until someone says otherwise: the
+	# wizard (lsdc <name> setup) asks whether to list it, the rest is
 	# lsdctl's to change afterwards, on the running instance.
 	docker run --rm -v "$name:/data" "$IMAGE" setup --defaults >/dev/null \
 		|| { docker volume rm "$name" >/dev/null; die "setup failed; nothing kept"; }
@@ -185,6 +186,7 @@ cmd_new() {
 	offline_sh "$name" "
 		set -e
 		lsdctl set port $port --no-restart
+		lsdctl set masterlist_enabled False --no-restart
 		lsdctl set auth_db \"'/shared/auth.db'\" --no-restart
 		lsdctl set irc_console_db \"'/shared/auth.db'\" --no-restart
 		lsdctl set bans_db \"'/shared/bans.db'\" --no-restart" >/dev/null
@@ -193,9 +195,9 @@ cmd_new() {
 		-p "$port:$port/udp" -e LSD_HOST_ADDRESSES="${LSD_HOST_ADDRESSES:-}" \
 		-v "$name:/data" -v "$SHARED:/shared" "$IMAGE" >/dev/null
 	wait_up "$name"
-	echo "$name is up on $port/udp, on lsd-docker's defaults"
+	echo "$name is up on $port/udp, unlisted, on lsd-docker's defaults"
 	docker exec "$name" lsdctl address
-	echo "configure it: lsdc $name setup (the wizard), or lsdc $name set|gamemode|map|install ..."
+	echo "configure it: lsdc $name setup (the wizard; it asks about listing), or lsdc $name set|gamemode|map|install ..."
 }
 
 cmd_ports() {
