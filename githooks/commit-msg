@@ -1,0 +1,46 @@
+#!/bin/sh
+# commit-msg -- refuse commit messages that mention Claude or AI
+#
+# Copyright (C) 2026 Fran6nd. GPL-3.0-or-later; see LICENSE.
+#
+# Commits here are authored by one person and say so in the Author
+# field. A message that names Claude, Anthropic or any AI tool, or that
+# carries a co-author trailer or a generated-by footer, is refused.
+#
+# Enable it once per working copy (hooks are not carried by a clone):
+#
+#     git config core.hooksPath githooks
+#
+# It runs on commit and --amend, NOT on rebase, cherry-pick or
+# filter-branch, which reuse messages without asking it. Check a range
+# by hand with:  githooks/commit-msg --range <rev-range>
+set -eu
+
+# Words, matched whole and in any case. "ai" alone is a word here, so
+# "maintain" or "email" do not match.
+words='claude|anthropic|ai|a\.i\.|llm|chatgpt|gpt(-?[0-9][a-z0-9.]*)?|openai|copilot|gemini'
+pattern="(^|[^[:alnum:]])($words)([^[:alnum:]]|$)|co-authored-by:|generated (with|by)|🤖"
+
+check() { # $1: a message on stdin's behalf, $2: label
+	if printf '%s\n' "$1" | grep -qiE "$pattern"; then
+		echo "commit-msg: $2 mentions Claude/AI or carries attribution:" >&2
+		printf '%s\n' "$1" | grep -inE "$pattern" | sed 's/^/    /' >&2
+		return 1
+	fi
+}
+
+if [ "${1:-}" = --range ]; then
+	bad=0
+	for c in $(git rev-list "$2"); do
+		check "$(git log -1 --format=%B "$c")" "$(git log -1 --format='%h %s' "$c")" || bad=1
+	done
+	exit $bad
+fi
+
+# Drop the comment block git appends: its status text is not the message.
+body=$(sed '/^#/d' "$1")
+check "$body" "this message" || {
+	echo >&2
+	echo "  Edit the message and commit again." >&2
+	exit 1
+}
