@@ -26,7 +26,7 @@ DONE (commit), BLOCKED (on what).
 | 2 | Scope: a host-side CLI that creates lsd-docker instances and runs lsdctl on one, several or all of them (e.g. make someone admin everywhere) | REVIEW (study done 2026-11-25; owner to confirm the open questions) |
 | 4 | commit-msg hook: no mention of Claude/AI in commit messages | DONE (uncommitted) |
 | 5 | Interactive terminal: a shell inside the cluster with autocomplete (instances, lsdctl commands) to move between instances and run commands on the current one | TODO |
-| 3 | lsd-docker gap: no lsdctl command for accounts/admins (today: /register in game, then `lsdctl exec authcaps`) | TODO (in lsd-docker first) |
+| 3 | lsd-docker: `lsdctl account list\|add\|caps\|passwd\|rm` (patches 0003-accounts, 0004-console-redact) | REVIEW (in lsd-docker's working tree, uncommitted; dev/test.sh and dev/smoke.sh green) |
 
 ## Log
 
@@ -36,3 +36,4 @@ DONE (commit), BLOCKED (on what).
 - 2026-11-25: owner: Linux and macOS only.
 - 2026-11-25: githooks/commit-msg added and enabled (core.hooksPath); no commits existed yet, so no message needed editing.
 - 2026-11-25: owner: lsd-cluster provides an interactive terminal with autocomplete to navigate between instances (item 5).
+- 2026-11-25: item 3 built in lsd-docker. auth.lua gains useradd/userpasswd/userdel and auth_account(s) (patch 0003); lsdctl account drives them over the console and checks the result by reading the account back. Found and fixed on the way: the socket/websocket/IRC consoles logged passwords of /register and /login in clear (patch 0004).
