@@ -25,6 +25,7 @@ DONE (commit), BLOCKED (on what).
 | 1 | This file, README, LICENSE | DONE (uncommitted) |
 | 2 | Scope: a host-side CLI that creates lsd-docker instances and runs lsdctl on one, several or all of them (e.g. make someone admin everywhere) | REVIEW (study done 2026-11-25; owner to confirm the open questions) |
 | 4 | commit-msg hook: no mention of Claude/AI in commit messages | DONE (uncommitted) |
+| 5 | Interactive terminal: a shell inside the cluster with autocomplete (instances, lsdctl commands) to move between instances and run commands on the current one | TODO |
 | 3 | lsd-docker gap: no lsdctl command for accounts/admins (today: /register in game, then `lsdctl exec authcaps`) | TODO (in lsd-docker first) |
 
 ## Log
@@ -34,3 +35,4 @@ DONE (commit), BLOCKED (on what).
 - 2026-11-25: owner: the servers are sub-containers of the cluster's container, all on one host. Costs noted: the outer container runs --privileged; UDP ports are published at both levels; the inner images and volumes live on the cluster's own volume.
 - 2026-11-25: owner: Linux and macOS only.
 - 2026-11-25: githooks/commit-msg added and enabled (core.hooksPath); no commits existed yet, so no message needed editing.
+- 2026-11-25: owner: lsd-cluster provides an interactive terminal with autocomplete to navigate between instances (item 5).
